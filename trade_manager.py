@@ -6,11 +6,15 @@ import asyncio
 from decimal import Decimal, ROUND_DOWN
 import math
 import time
+from datetime import datetime, timedelta
 
 from config import cfg
 import mt5_connector as mt5c
 
 logger = logging.getLogger("trade_manager")
+
+# Track trades for MAX_TRADES_PER_DAY limit
+trades_today = []
 
 
 def pip_to_price(symbol_info: dict, pip: float) -> float:
@@ -35,8 +39,32 @@ def calculate_lots(account_balance: float, stop_distance: float, risk_percent: f
     return lots
 
 
+def has_hit_trade_limit() -> bool:
+    """Check if we've hit MAX_TRADES_PER_DAY limit."""
+    now = datetime.now()
+    yesterday = now - timedelta(hours=24)
+    
+    # Remove trades older than 24 hours
+    global trades_today
+    trades_today = [t for t in trades_today if t > yesterday]
+    
+    return len(trades_today) >= cfg.MAX_TRADES_PER_DAY
+
+
 async def execute_trade(symbol: str, side: str, confidence: int, stop_distance: Optional[float], take_distance: Optional[float]) -> dict:
     """Place trade if meets risk/confidence rules."""
+    
+    # Check daily trade limit
+    if has_hit_trade_limit():
+        logger.warning(f"⚠️ Daily trade limit reached ({cfg.MAX_TRADES_PER_DAY} trades). Skipping.")
+        return {"status": "rejected", "reason": "daily_limit_reached"}
+    
+    # Use MIN_CONFIDENCE_TO_TRADE for testing, CONFIDENCE_THRESHOLD for live
+    min_conf = cfg.MIN_CONFIDENCE_TO_TRADE if cfg.ENABLE_FORCE_TEST else cfg.CONFIDENCE_THRESHOLD
+    if confidence < min_conf:
+        logger.debug(f"Confidence {confidence}% < threshold {min_conf}%. Skipping trade.")
+        return {"status": "rejected", "reason": "low_confidence"}
+    
     # check spread
     info = mt5c.symbol_info(symbol)
     if info is None:
@@ -46,7 +74,7 @@ async def execute_trade(symbol: str, side: str, confidence: int, stop_distance: 
     # convert to pips approx
     spread_pips = spread / info.get("point", 1)
     if spread_pips > cfg.MAX_SPREAD_PIPS:
-        logger.warning("Spread too high: %s pips", spread_pips)
+        logger.warning("⚠️ Spread too high: %s pips", spread_pips)
         return {"status": "rejected", "reason": "high_spread", "spread_pips": spread_pips}
 
     # get account info
@@ -67,11 +95,22 @@ async def execute_trade(symbol: str, side: str, confidence: int, stop_distance: 
         sl = price + (stop_distance or 0) if stop_distance else None
         tp = price - (take_distance or 0) if take_distance else None
 
-    logger.info("Placing %s %.2f lots %s SL: %s TP: %s confidence=%s", side, lots, symbol, sl, tp, confidence)
+    logger.info(f"🚀 Placing {side.upper()} {lots:.2f}L {symbol} @ {price:.5f} | SL: {sl:.5f} | TP: {tp:.5f} | Conf: {confidence}%")
 
     # send order (blocking call) via executor
     result = await asyncio.to_thread(mt5c.send_order, symbol, side, lots, price, sl, tp)
-    logger.info("Order result: %s", result)
+    logger.info("✅ Order result: %s", result)
+    
+    # FEATURE 3: Draw arrow on chart
+    mt5c.place_arrow_on_chart(symbol, datetime.now(), side, price, confidence)
+    
+    # Track this trade
+    global trades_today
+    trades_today.append(datetime.now())
+    
+    # Update dashboard
+    mt5c.set_dashboard_state(side, confidence)
+    
     return result
 
 

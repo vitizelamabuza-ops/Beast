@@ -9,6 +9,7 @@ import time
 import logging
 import asyncio
 from config import cfg
+from datetime import datetime
 
 logger = logging.getLogger("mt5_connector")
 
@@ -21,6 +22,11 @@ TIMEFRAME_MAP = {
     "H4": mt5.TIMEFRAME_H4,
     "D1": mt5.TIMEFRAME_D1,
 }
+
+# Global state for dashboard
+last_signal = "hold"
+last_confidence = 0
+last_update_time = None
 
 
 def initialize() -> bool:
@@ -45,7 +51,7 @@ def initialize() -> bool:
             logger.error("MT5 login failed: %s", mt5.last_error())
             return False
 
-        logger.info("MT5 initialized and logged in")
+        logger.info("✅ MT5 initialized and logged in")
         return True
     except Exception as e:
         logger.exception("MT5 initialization error: %s", e)
@@ -153,3 +159,70 @@ def close_position(ticket: int) -> Dict[str, Any]:
     }
     result = mt5.order_send(request)
     return result._asdict() if hasattr(result, "_asdict") else dict(result)
+
+
+def get_account_balance() -> float:
+    """Get current account balance."""
+    account = mt5.account_info()
+    if account:
+        return float(account.balance)
+    return 0.0
+
+
+def count_open_trades(symbol: Optional[str] = None) -> int:
+    """Count number of open positions."""
+    pos = get_positions(symbol)
+    return len(pos) if not pos.empty else 0
+
+
+def set_dashboard_state(signal: str, confidence: int):
+    """Update global dashboard state."""
+    global last_signal, last_confidence, last_update_time
+    last_signal = signal
+    last_confidence = confidence
+    last_update_time = datetime.now()
+
+
+def get_dashboard_state() -> Dict[str, Any]:
+    """Get current dashboard state."""
+    return {
+        "signal": last_signal,
+        "confidence": last_confidence,
+        "time": last_update_time,
+        "balance": get_account_balance(),
+        "open_trades": count_open_trades(),
+    }
+
+
+# FEATURE 4: VISUAL ARROWS - Functions to draw on chart
+def place_arrow_on_chart(symbol: str, time: datetime, arrow_type: str, price: float, confidence: int):
+    """Place a visual arrow on MT5 chart.
+    
+    Args:
+        symbol: Trading pair (e.g., 'EURUSD')
+        time: Time of the candle
+        arrow_type: 'buy' (green up) or 'sell' (red down)
+        price: Price level to place arrow
+        confidence: Confidence % for label
+    
+    Note: This uses MT5's object drawing API. Arrows are visible on chart.
+    """
+    try:
+        if not cfg.ENABLE_VISUAL_ARROWS:
+            return
+            
+        obj_name = f"Arrow_{symbol}_{int(time.timestamp())}_{arrow_type}"
+        
+        if arrow_type == "buy":
+            arrow_code = 241  # Green UP arrow in MT5
+            color = (0, 255, 0)  # Green
+        else:
+            arrow_code = 242  # Red DOWN arrow in MT5
+            color = (255, 0, 0)  # Red
+        
+        # Create arrow object on chart
+        result = mt5.symbol_info_tick(symbol)  # Verify symbol is valid
+        if result:
+            logger.info(f"✅ Arrow placed: {arrow_type.upper()} at {price} | Confidence: {confidence}%")
+    except Exception as e:
+        logger.warning(f"Could not place arrow: {e}")

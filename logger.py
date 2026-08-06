@@ -8,7 +8,11 @@ LOG_FILE = "bot.log"
 
 
 def setup_logging(level: int = logging.INFO) -> None:
-    fmt = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+    """Setup logging with file and console handlers.
+    
+    FEATURE 1: Enhanced logging with timestamps and debug info
+    """
+    fmt = "%(asctime)s %(levelname)-8s [%(name)s] %(message)s"
     root = logging.getLogger()
     root.setLevel(level)
 

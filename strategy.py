@@ -5,10 +5,34 @@ from typing import Dict, Any
 import pandas as pd
 import numpy as np
 from indicators import compute_all
+from config import cfg
+import logging
+
+logger = logging.getLogger("strategy")
 
 
-def score_signal(row: pd.Series) -> Dict[str, Any]:
-    """Return signal type: 'buy', 'sell', or 'hold' with confidence score and reason breakdown."""
+def score_signal(row: pd.Series, force_buy: bool = False) -> Dict[str, Any]:
+    """Return signal type: 'buy', 'sell', or 'hold' with confidence score and reason breakdown.
+    
+    Args:
+        row: Last row of indicator dataframe
+        force_buy: If True, force a BUY signal with 99% confidence (for testing)
+    """
+    # FEATURE 2: FORCE TEST BUTTON
+    if force_buy and cfg.ENABLE_FORCE_TEST:
+        logger.info("🔴 FORCE TEST ENABLED: Returning 99% confidence BUY signal")
+        return {
+            "signal": "buy",
+            "confidence": 99,
+            "reasons": {"trend": 100, "momentum": 100, "volatility": 100, "confirmation": 100},
+            "atr": row["atr14"] if not np.isnan(row["atr14"]) else 0.0,
+            "stop_distance": float((row["atr14"] * 1.5) if not np.isnan(row["atr14"]) else 0.01),
+            "take_distance": float((row["atr14"] * 2.5) if not np.isnan(row["atr14"]) else 0.02),
+            "rsi": row["rsi14"],
+            "ema50": row["ema50"],
+            "ema200": row["ema200"],
+        }
+    
     # weights for different checks
     weights = {
         "trend": 0.35,
@@ -60,8 +84,6 @@ def score_signal(row: pd.Series) -> Dict[str, Any]:
     elif trend_dir == "bear" and not macd_ok and not rsi_ok and final_conf >= 0:
         signal = "sell"
 
-    # But we'll only allow trade if confidence >= threshold at higher level
-
     # Build SL/TP suggestion using ATR multiples
     atr = atr_val
     if atr <= 0 or np.isnan(atr):
@@ -72,6 +94,15 @@ def score_signal(row: pd.Series) -> Dict[str, Any]:
         sl = float(atr * 1.5)  # 1.5 ATR stop
         tp = float(atr * 2.5)  # 2.5 ATR target
 
+    # FEATURE 1: DEBUG MODE - Log all indicator values
+    if cfg.DEBUG_MODE:
+        logger.info(
+            f"📊 DEBUG: RSI={row['rsi14']:.2f} | EMA50={row['ema50']:.5f} | "
+            f"EMA200={row['ema200']:.5f} | Price={row['close']:.5f} | "
+            f"Confidence={final_conf}% | Signal={signal.upper()} | "
+            f"MACD={row['macd_hist']:.6f} | ADX={row['adx14']:.2f}"
+        )
+
     return {
         "signal": signal,
         "confidence": final_conf,
@@ -79,11 +110,19 @@ def score_signal(row: pd.Series) -> Dict[str, Any]:
         "atr": atr,
         "stop_distance": sl,
         "take_distance": tp,
+        "rsi": row["rsi14"],
+        "ema50": row["ema50"],
+        "ema200": row["ema200"],
     }
 
 
-def generate_signal(df: pd.DataFrame) -> Dict[str, Any]:
-    """Compute indicators and return a signal based on the last row."""
+def generate_signal(df: pd.DataFrame, force_buy: bool = False) -> Dict[str, Any]:
+    """Compute indicators and return a signal based on the last row.
+    
+    Args:
+        df: Dataframe with price data (open, high, low, close)
+        force_buy: If True, force BUY signal (for testing)
+    """
     df2 = compute_all(df.tail(300))
     last = df2.iloc[-1]
-    return score_signal(last)
+    return score_signal(last, force_buy=force_buy)
