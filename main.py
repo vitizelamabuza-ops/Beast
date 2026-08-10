@@ -30,20 +30,33 @@ async def bot_loop():
     
     ok = mt5c.initialize()
     if not ok:
-        logger.error("❌ MT5 initialization failed, exiting")
+        logger.error("MT5 initialization failed, exiting")
         return
 
-    logger.info("="*80)
-    logger.info("🤖 BEAST BOT STARTED")
-    logger.info(f"📊 Symbol: {cfg.SYMBOL} | Timeframe: {cfg.TIMEFRAME}")
-    logger.info(f"⚙️  Confidence Threshold: {cfg.CONFIDENCE_THRESHOLD}%")
-    logger.info(f"⚙️  Min Confidence to Trade: {cfg.MIN_CONFIDENCE_TO_TRADE}%")
-    logger.info(f"🧪 Debug Mode: {cfg.DEBUG_MODE}")
-    logger.info(f"🧪 Force Test Enabled: {cfg.ENABLE_FORCE_TEST}")
-    logger.info(f"🎯 Visual Arrows: {cfg.ENABLE_VISUAL_ARROWS}")
-    logger.info(f"📺 Dashboard: {cfg.ENABLE_DASHBOARD}")
-    logger.info(f"⚖️  Max Trades/Day: {cfg.MAX_TRADES_PER_DAY}")
-    logger.info("="*80)
+    # Run a quick diagnostic to make sure account, symbol and recent rates are available
+    diag = mt5c.check_connection()
+    if not diag.get("initialized"):
+        logger.error("MT5 diagnostic failed: %s", diag.get("errors"))
+        mt5c.shutdown()
+        return
+    if diag.get("symbol_info") is None:
+        logger.error("Required symbol not available: %s", cfg.SYMBOL)
+        mt5c.shutdown()
+        return
+    if not diag.get("recent_rates_ok"):
+        logger.error("No recent market data available for symbol %s", cfg.SYMBOL)
+        mt5c.shutdown()
+        return
+
+    logger.info("BEAST BOT STARTED")
+    logger.info("Symbol: %s | Timeframe: %s", cfg.SYMBOL, cfg.TIMEFRAME)
+    logger.info("Confidence Threshold: %s%%", cfg.CONFIDENCE_THRESHOLD)
+    logger.info("Min Confidence to Trade: %s%%", cfg.MIN_CONFIDENCE_TO_TRADE)
+    logger.info("Debug Mode: %s", cfg.DEBUG_MODE)
+    logger.info("Force Test Enabled: %s", cfg.ENABLE_FORCE_TEST)
+    logger.info("Visual Arrows: %s", cfg.ENABLE_VISUAL_ARROWS)
+    logger.info("Dashboard: %s", cfg.ENABLE_DASHBOARD)
+    logger.info("Max Trades/Day: %s", cfg.MAX_TRADES_PER_DAY)
 
     try:
         loop_count = 0
@@ -52,17 +65,21 @@ async def bot_loop():
                 loop_count += 1
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 
-                logger.info(f"\n🔄 Loop #{loop_count} at {current_time}")
+                logger.info("Loop #%d at %s", loop_count, current_time)
                 
                 # Get market data
                 df = await mt5c.get_rates_async(cfg.SYMBOL, cfg.TIMEFRAME, cfg.HIST_PERIODS)
+                if df is None or df.empty:
+                    logger.warning("No rates data returned for %s", cfg.SYMBOL)
+                    await asyncio.sleep(cfg.POLL_INTERVAL)
+                    continue
                 
                 # FEATURE 2: FORCE TEST - Use on first iteration if enabled
                 force_buy = False
                 if cfg.ENABLE_FORCE_TEST and not force_test_used:
                     force_buy = True
                     force_test_used = True
-                    logger.warning("🔴 FORCE TEST MODE ACTIVATED - Will send test trade")
+                    logger.warning("FORCE TEST MODE ACTIVATED - Will send test trade")
                 
                 # Generate signal
                 signal = generate_signal(df, force_buy=force_buy)
@@ -70,42 +87,38 @@ async def bot_loop():
                 # FEATURE 1: DEBUG MODE - Log all details
                 if cfg.DEBUG_MODE:
                     logger.info(
-                        f"\n📋 SIGNAL DETAILS:\n"
-                        f"  Signal: {signal['signal'].upper()}\n"
-                        f"  Confidence: {signal['confidence']}%\n"
-                        f"  RSI(14): {signal.get('rsi', 0):.2f}\n"
-                        f"  EMA50: {signal.get('ema50', 0):.5f}\n"
-                        f"  EMA200: {signal.get('ema200', 0):.5f}\n"
-                        f"  Price: {df['close'].iloc[-1]:.5f}\n"
-                        f"  ATR: {signal.get('atr', 0):.6f}\n"
-                        f"  Reasons: {signal['reasons']}"
+                        "SIGNAL DETAILS: Signal=%s Confidence=%s RSI=%.2f EMA50=%.5f EMA200=%.5f Price=%.5f ATR=%.6f Reasons=%s",
+                        signal.get("signal", "hold").upper(),
+                        signal.get("confidence", 0),
+                        signal.get("rsi", 0.0),
+                        signal.get("ema50", 0.0),
+                        signal.get("ema200", 0.0),
+                        float(df['close'].iloc[-1]) if 'close' in df.columns and not df['close'].empty else 0.0,
+                        signal.get("atr", 0.0),
+                        signal.get('reasons')
                     )
                 else:
-                    logger.info(
-                        f"Signal: {signal['signal'].upper()} | "
-                        f"Confidence: {signal['confidence']}% | "
-                        f"RSI: {signal.get('rsi', 0):.2f}"
-                    )
+                    logger.info("Signal: %s | Confidence: %s%% | RSI: %.2f",
+                                signal.get('signal', 'hold').upper(),
+                                signal.get('confidence', 0),
+                                signal.get('rsi', 0.0))
                 
                 # FEATURE 4: LIVE DASHBOARD
                 if cfg.ENABLE_DASHBOARD:
                     balance = mt5c.get_account_balance()
                     open_trades = mt5c.count_open_trades(cfg.SYMBOL)
-                    logger.info(
-                        f"\n📺 DASHBOARD:\n"
-                        f"  Status: 🟢 LIVE\n"
-                        f"  Last Update: {current_time}\n"
-                        f"  Last Signal: {signal['signal'].upper()}\n"
-                        f"  Confidence: {signal['confidence']}%\n"
-                        f"  Open Trades: {open_trades}\n"
-                        f"  Balance: ${balance:,.2f}"
-                    )
+                    logger.info("DASHBOARD: Status=LIVE LastUpdate=%s LastSignal=%s Confidence=%s%% OpenTrades=%s Balance=$%s",
+                                current_time,
+                                signal.get('signal', 'hold').upper(),
+                                signal.get('confidence', 0),
+                                open_trades,
+                                f"{balance:,.2f}")
                 
                 # Check if we should trade
                 min_conf_threshold = cfg.MIN_CONFIDENCE_TO_TRADE if cfg.ENABLE_FORCE_TEST else cfg.CONFIDENCE_THRESHOLD
                 
                 if signal["confidence"] >= min_conf_threshold and signal["signal"] in ("buy", "sell"):
-                    logger.info(f"\n✅ TRADE SIGNAL CONFIRMED | Executing {signal['signal'].upper()}...")
+                    logger.info("TRADE SIGNAL CONFIRMED | Executing %s...", signal['signal'].upper())
                     result = await execute_trade(
                         cfg.SYMBOL,
                         signal["signal"],
@@ -113,41 +126,38 @@ async def bot_loop():
                         signal["stop_distance"],
                         signal["take_distance"]
                     )
-                    if result.get("retcode") == 10009:  # TRADE_RETCODE_DONE
-                        logger.info(f"✅ Trade EXECUTED successfully")
+                    # result is expected to be a dict from mt5
+                    retcode = result.get('retcode') if isinstance(result, dict) else None
+                    if retcode == 10009:  # TRADE_RETCODE_DONE
+                        logger.info("Trade executed successfully")
                     else:
-                        logger.warning(f"⚠️  Trade result: {result}")
+                        logger.warning("Trade result: %s", result)
                 else:
                     if cfg.DEBUG_MODE:
-                        logger.debug(
-                            f"No trade - Confidence {signal['confidence']}% < threshold {min_conf_threshold}% "
-                            f"or signal is '{signal['signal']}'"
-                        )
+                        logger.debug("No trade - Confidence %s%% < threshold %s%% or signal is '%s'",
+                                     signal.get('confidence', 0), min_conf_threshold, signal.get('signal', 'hold'))
 
                 # manage open positions
                 await manage_open_positions(cfg.SYMBOL)
 
             except Exception as e:
-                logger.exception(f"❌ Error in main loop: {e}")
+                logger.exception("Error in main loop: %s", e)
 
             # Wait for next check
-            logger.debug(f"Sleeping for {cfg.POLL_INTERVAL}s...")
+            logger.debug("Sleeping for %s seconds...", cfg.POLL_INTERVAL)
             await asyncio.sleep(cfg.POLL_INTERVAL)
     finally:
         mt5c.shutdown()
-        logger.info("🛑 Bot stopped")
+        logger.info("Bot stopped")
 
 
 def main():
     setup_logging()
     logger.info("Starting bot for %s %s", cfg.SYMBOL, cfg.TIMEFRAME)
-    loop = asyncio.get_event_loop()
     try:
-        loop.run_until_complete(bot_loop())
+        asyncio.run(bot_loop())
     except KeyboardInterrupt:
-        logger.info("⏹️  Interrupted by user")
-    finally:
-        loop.close()
+        logger.info("Interrupted by user")
 
 
 if __name__ == "__main__":
