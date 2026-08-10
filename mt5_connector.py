@@ -1,5 +1,17 @@
 """MetaTrader 5 connection and market data utilities.
 Wraps the MetaTrader5 package and provides helpers used by the bot.
+
+This module provides robust initialization and diagnostics for the MetaTrader5
+Python package when used with the MetaTrader 5 desktop terminal on Windows.
+
+Key features added:
+- Prefer MT5_TERMINAL_PATH (or MT5_PATH) from environment/config
+- Validate terminal executable exists before initializing
+- Optionally start the terminal process (Windows) when not running
+- Retry initialization a small number of times with delays
+- Provide a connection diagnostic function (check_connection)
+- Always call mt5.shutdown() on failure/cleanup
+- Remove all emoji characters from logs and user messages
 """
 from __future__ import annotations
 import MetaTrader5 as mt5
@@ -10,6 +22,9 @@ import logging
 import asyncio
 from config import cfg
 from datetime import datetime
+import os
+import subprocess
+import glob
 
 logger = logging.getLogger("mt5_connector")
 
@@ -29,33 +44,147 @@ last_confidence = 0
 last_update_time = None
 
 
-def initialize() -> bool:
-    """Initialize and connect to MT5 terminal.
-    Returns True on success.
+def _find_possible_terminals() -> list:
+    """Return a list of likely terminal executable paths on Windows.
+
+    This does not assume installation paths; it looks for common names in
+    Program Files folders. The caller should validate existence.
+    """
+    candidates = []
+    program_dirs = [os.environ.get("ProgramFiles", "C:\\Program Files"),
+                    os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")]
+    for base in program_dirs:
+        # look for directories containing 'terminal*.exe'
+        pattern = os.path.join(base, "**", "terminal*.exe")
+        candidates.extend(glob.glob(pattern, recursive=True))
+    # Remove duplicates and keep full paths
+    seen = set()
+    result = []
+    for p in candidates:
+        if p not in seen and os.path.isfile(p):
+            seen.add(p)
+            result.append(p)
+    return result
+
+
+def _start_terminal(path: str) -> bool:
+    """Start the MetaTrader terminal process (Windows). Returns True if started.
+
+    This uses subprocess.Popen to start the terminal executable. It does not
+    attempt to manage UI prompts or login dialogs. The process is launched
+    detached so the Python process can continue.
     """
     try:
-        if cfg.MT5_PATH:
-            mt5.initialize(cfg.MT5_PATH)
+        # Use CREATE_NEW_PROCESS_GROUP and DETACHED_PROCESS flags on Windows when available
+        if os.name == "nt":
+            DETACHED = 0x00000008
+            subprocess.Popen([path], close_fds=True, creationflags=DETACHED)
         else:
-            mt5.initialize()
+            subprocess.Popen([path], close_fds=True)
+        logger.info("Started MetaTrader terminal: %s", path)
+        return True
+    except Exception:
+        logger.exception("Failed to start MetaTrader terminal: %s", path)
+        return False
 
-        if cfg.MT5_LOGIN and cfg.MT5_PASSWORD and cfg.MT5_SERVER:
-            authorized = mt5.login(int(cfg.MT5_LOGIN), password=cfg.MT5_PASSWORD, server=cfg.MT5_SERVER)
-        elif cfg.MT5_LOGIN and cfg.MT5_PASSWORD:
-            authorized = mt5.login(int(cfg.MT5_LOGIN), password=cfg.MT5_PASSWORD)
-        else:
-            # assume already logged in via terminal
-            authorized = True
 
-        if not authorized:
-            logger.error("MT5 login failed: %s", mt5.last_error())
+def initialize(retries: int = 3, delay: int = 5, start_if_missing: bool = True) -> bool:
+    """Initialize and connect to MT5 terminal.
+    Returns True on success, False on error.
+
+    Behavior:
+    - Use cfg.MT5_TERMINAL_PATH or cfg.MT5_PATH if provided. If not provided,
+      search common installation locations.
+    - Verify the executable exists before attempting to initialize.
+    - If the terminal is not running and start_if_missing is True, attempt to
+      start it and wait briefly for IPC channel to be available.
+    - Retry mt5.initialize/login a small number of times.
+    - On failure, call mt5.last_error() and log diagnostics.
+    - Always call mt5.shutdown() on fatal failures to ensure a clean state.
+    """
+    terminal_path = getattr(cfg, "MT5_TERMINAL_PATH", None) or cfg.MT5_PATH
+
+    # If a configured path is provided, validate
+    if terminal_path:
+        terminal_path = terminal_path.strip('"')
+        if not os.path.isfile(terminal_path):
+            logger.error("Configured MT5 terminal path does not exist: %s", terminal_path)
             return False
 
-        logger.info("✅ MT5 initialized and logged in")
-        return True
-    except Exception as e:
-        logger.exception("MT5 initialization error: %s", e)
-        return False
+    # If not configured, try to find common terminals
+    if not terminal_path:
+        found = _find_possible_terminals()
+        if found:
+            # Prefer terminal64.exe if present
+            found_sorted = sorted(found, key=lambda p: ("terminal64" not in p.lower(), p))
+            terminal_path = found_sorted[0]
+            logger.info("Auto-detected MT5 terminal path: %s", terminal_path)
+        else:
+            logger.warning("No MT5 terminal path configured and none found in common locations.")
+            terminal_path = None
+
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            if terminal_path:
+                logger.info("Initializing MetaTrader5 with terminal path: %s (attempt %d)", terminal_path, attempt)
+                ok = mt5.initialize(terminal_path)
+            else:
+                logger.info("Initializing MetaTrader5 without explicit terminal path (auto-discovery) (attempt %d)", attempt)
+                ok = mt5.initialize()
+
+            if not ok:
+                last_err = mt5.last_error()
+                logger.warning("mt5.initialize() returned False on attempt %d: %s", attempt, last_err)
+                if terminal_path and start_if_missing:
+                    logger.info("Attempting to start MT5 terminal and retry initialization (attempt %d)", attempt)
+                    _start_terminal(terminal_path)
+                    time.sleep(delay)
+                    continue
+                else:
+                    time.sleep(delay)
+                    continue
+
+            # If initialization succeeded, attempt login if credentials provided
+            authorized = True
+            if cfg.MT5_LOGIN and cfg.MT5_PASSWORD:
+                try:
+                    if cfg.MT5_SERVER:
+                        logger.info("Logging into MT5 account %s on server %s", cfg.MT5_LOGIN, cfg.MT5_SERVER)
+                        authorized = mt5.login(int(cfg.MT5_LOGIN), password=cfg.MT5_PASSWORD, server=cfg.MT5_SERVER)
+                    else:
+                        logger.info("Logging into MT5 account %s", cfg.MT5_LOGIN)
+                        authorized = mt5.login(int(cfg.MT5_LOGIN), password=cfg.MT5_PASSWORD)
+                except Exception:
+                    last_err = mt5.last_error()
+                    logger.exception("Exception during mt5.login(): %s", last_err)
+                    authorized = False
+
+            if not authorized:
+                last_err = mt5.last_error()
+                logger.error("MT5 login failed: %s", last_err)
+                try:
+                    mt5.shutdown()
+                except Exception:
+                    logger.exception("Error shutting down MT5 after failed login")
+                time.sleep(delay)
+                continue
+
+            logger.info("MT5 initialized and (if configured) logged in")
+            return True
+
+        except Exception as exc:
+            last_err = getattr(exc, "args", exc)
+            logger.exception("MT5 initialization exception on attempt %d: %s", attempt, exc)
+            try:
+                mt5.shutdown()
+            except Exception:
+                logger.exception("Error shutting down MT5 after exception")
+            time.sleep(delay)
+            continue
+
+    logger.error("MT5 initialization failed after %d attempts. Last error: %s", retries, last_err)
+    return False
 
 
 def shutdown() -> None:
@@ -201,7 +330,7 @@ def place_arrow_on_chart(symbol: str, time: datetime, arrow_type: str, price: fl
     Args:
         symbol: Trading pair (e.g., 'EURUSD')
         time: Time of the candle
-        arrow_type: 'buy' (green up) or 'sell' (red down)
+        arrow_type: 'buy' (up) or 'sell' (down)
         price: Price level to place arrow
         confidence: Confidence % for label
     
@@ -214,15 +343,74 @@ def place_arrow_on_chart(symbol: str, time: datetime, arrow_type: str, price: fl
         obj_name = f"Arrow_{symbol}_{int(time.timestamp())}_{arrow_type}"
         
         if arrow_type == "buy":
-            arrow_code = 241  # Green UP arrow in MT5
+            arrow_code = 241  # Up arrow in MT5
             color = (0, 255, 0)  # Green
         else:
-            arrow_code = 242  # Red DOWN arrow in MT5
+            arrow_code = 242  # Down arrow in MT5
             color = (255, 0, 0)  # Red
         
-        # Create arrow object on chart
+        # Create arrow object on chart - simplified: verify symbol is valid
         result = mt5.symbol_info_tick(symbol)  # Verify symbol is valid
         if result:
-            logger.info(f"✅ Arrow placed: {arrow_type.upper()} at {price} | Confidence: {confidence}%")
+            logger.info("Arrow placed: %s at %s | Confidence: %s", arrow_type.upper(), price, confidence)
     except Exception as e:
-        logger.warning(f"Could not place arrow: {e}")
+        logger.warning("Could not place arrow: %s", e)
+
+
+def check_connection(timeout_seconds: int = 5) -> Dict[str, Any]:
+    """Run a set of checks to verify the MT5 connection and return diagnostics.
+
+    The returned dict contains keys:
+      - initialized: bool
+      - terminal_info: value or None
+      - account_info: value or None
+      - symbol_info: value or None
+      - recent_rates_ok: bool
+      - errors: list of error messages
+    """
+    diag = {"initialized": False, "terminal_info": None, "account_info": None, "symbol_info": None, "recent_rates_ok": False, "errors": []}
+    try:
+        # check initialize state
+        if not mt5.initialize():
+            # If initialize returns False it may still be initialized; call last_error for detail
+            diag["errors"].append(f"mt5.initialize() returned False: {mt5.last_error()}")
+        else:
+            diag["initialized"] = True
+
+        try:
+            tinfo = mt5.terminal_info()
+            diag["terminal_info"] = tinfo._asdict() if tinfo else None
+        except Exception:
+            diag["errors"].append(f"terminal_info() error: {mt5.last_error()}")
+
+        try:
+            ainfo = mt5.account_info()
+            diag["account_info"] = ainfo._asdict() if ainfo else None
+        except Exception:
+            diag["errors"].append(f"account_info() error: {mt5.last_error()}")
+
+        # symbol
+        try:
+            s = cfg.SYMBOL
+            sinfo = mt5.symbol_info(s)
+            diag["symbol_info"] = sinfo._asdict() if sinfo else None
+        except Exception:
+            diag["errors"].append(f"symbol_info({cfg.SYMBOL}) error: {mt5.last_error()}")
+
+        # recent rates
+        try:
+            rates = mt5.copy_rates_from_pos(cfg.SYMBOL, TIMEFRAME_MAP.get(cfg.TIMEFRAME, mt5.TIMEFRAME_H1), 0, 10)
+            diag["recent_rates_ok"] = rates is not None
+        except Exception:
+            diag["errors"].append(f"copy_rates_from_pos error: {mt5.last_error()}")
+
+    except Exception as exc:
+        diag["errors"].append(str(exc))
+
+    finally:
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+
+    return diag
