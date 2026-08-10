@@ -51,7 +51,7 @@ def initialize() -> bool:
             logger.error("MT5 login failed: %s", mt5.last_error())
             return False
 
-        logger.info("✅ MT5 initialized and logged in")
+        logger.info("MT5 initialized and logged in")
         return True
     except Exception as e:
         logger.exception("MT5 initialization error: %s", e)
@@ -223,6 +223,6 @@ def place_arrow_on_chart(symbol: str, time: datetime, arrow_type: str, price: fl
         # Create arrow object on chart
         result = mt5.symbol_info_tick(symbol)  # Verify symbol is valid
         if result:
-            logger.info(f"✅ Arrow placed: {arrow_type.upper()} at {price} | Confidence: {confidence}%")
+            logger.info(f"Arrow placed: {arrow_type.upper()} at {price} | Confidence: {confidence}%")
     except Exception as e:
         logger.warning(f"Could not place arrow: {e}")
