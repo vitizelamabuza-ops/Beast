@@ -370,19 +370,38 @@ def check_connection(timeout_seconds: int = 5) -> Dict[str, Any]:
     """
     diag = {"initialized": False, "terminal_info": None, "account_info": None, "symbol_info": None, "recent_rates_ok": False, "errors": []}
     try:
-        # check initialize state
-        if not mt5.initialize():
-            # If initialize returns False it may still be initialized; call last_error for detail
-            diag["errors"].append(f"mt5.initialize() returned False: {mt5.last_error()}")
-        else:
-            diag["initialized"] = True
-
+        # First check if MT5 is already initialized (terminal_info available)
         try:
             tinfo = mt5.terminal_info()
-            diag["terminal_info"] = tinfo._asdict() if tinfo else None
+            if tinfo:
+                diag["initialized"] = True
+                diag["terminal_info"] = tinfo._asdict()
+                already_initialized = True
+            else:
+                already_initialized = False
         except Exception:
-            diag["errors"].append(f"terminal_info() error: {mt5.last_error()}")
+            already_initialized = False
 
+        if not already_initialized:
+            # attempt initialize for diagnostic purposes
+            terminal_path = getattr(cfg, "MT5_TERMINAL_PATH", None) or cfg.MT5_PATH
+            if terminal_path:
+                ok = mt5.initialize(terminal_path)
+            else:
+                ok = mt5.initialize()
+
+            if not ok:
+                diag["errors"].append(f"mt5.initialize() returned False: {mt5.last_error()}")
+                return diag
+            else:
+                diag["initialized"] = True
+                try:
+                    tinfo = mt5.terminal_info()
+                    diag["terminal_info"] = tinfo._asdict() if tinfo else None
+                except Exception:
+                    diag["errors"].append(f"terminal_info() error after init: {mt5.last_error()}")
+
+        # account info
         try:
             ainfo = mt5.account_info()
             diag["account_info"] = ainfo._asdict() if ainfo else None
@@ -400,17 +419,11 @@ def check_connection(timeout_seconds: int = 5) -> Dict[str, Any]:
         # recent rates
         try:
             rates = mt5.copy_rates_from_pos(cfg.SYMBOL, TIMEFRAME_MAP.get(cfg.TIMEFRAME, mt5.TIMEFRAME_H1), 0, 10)
-            diag["recent_rates_ok"] = rates is not None
+            diag["recent_rates_ok"] = rates is not None and len(rates) > 0
         except Exception:
             diag["errors"].append(f"copy_rates_from_pos error: {mt5.last_error()}")
 
     except Exception as exc:
         diag["errors"].append(str(exc))
-
-    finally:
-        try:
-            mt5.shutdown()
-        except Exception:
-            pass
 
     return diag
