@@ -1,4 +1,4 @@
-meta-trader5==5.0.62
+MetaTrader5
 pandas>=1.5
 numpy>=1.23
 ta>=0.8.0
