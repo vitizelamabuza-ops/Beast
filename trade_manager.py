@@ -19,9 +19,9 @@ trades_today = []
 
 def pip_to_price(symbol_info: dict, pip: float) -> float:
     # determine pip size from symbol_info
-    digits = symbol_info.get("digits", 5)
+    # Typical conversion: price change = pip * point
     point = symbol_info.get("point", 0.00001)
-    return pip * point / (point)
+    return float(pip) * float(point)
 
 
 def calculate_lots(account_balance: float, stop_distance: float, risk_percent: float) -> float:
@@ -56,13 +56,13 @@ async def execute_trade(symbol: str, side: str, confidence: int, stop_distance: 
     
     # Check daily trade limit
     if has_hit_trade_limit():
-        logger.warning(f"⚠️ Daily trade limit reached ({cfg.MAX_TRADES_PER_DAY} trades). Skipping.")
+        logger.warning("Daily trade limit reached (%s trades). Skipping.", cfg.MAX_TRADES_PER_DAY)
         return {"status": "rejected", "reason": "daily_limit_reached"}
     
     # Use MIN_CONFIDENCE_TO_TRADE for testing, CONFIDENCE_THRESHOLD for live
     min_conf = cfg.MIN_CONFIDENCE_TO_TRADE if cfg.ENABLE_FORCE_TEST else cfg.CONFIDENCE_THRESHOLD
     if confidence < min_conf:
-        logger.debug(f"Confidence {confidence}% < threshold {min_conf}%. Skipping trade.")
+        logger.debug("Confidence %s%% < threshold %s%%. Skipping trade.", confidence, min_conf)
         return {"status": "rejected", "reason": "low_confidence"}
     
     # check spread
@@ -70,11 +70,17 @@ async def execute_trade(symbol: str, side: str, confidence: int, stop_distance: 
     if info is None:
         raise RuntimeError("Symbol info unavailable")
 
-    spread = (info.get("ask") - info.get("bid")) if info.get("ask") and info.get("bid") else 0
+    ask = info.get("ask")
+    bid = info.get("bid")
+    point = info.get("point", 1)
+    spread = (ask - bid) if ask is not None and bid is not None else 0
     # convert to pips approx
-    spread_pips = spread / info.get("point", 1)
+    try:
+        spread_pips = spread / float(point) if point else float('inf')
+    except Exception:
+        spread_pips = float('inf')
     if spread_pips > cfg.MAX_SPREAD_PIPS:
-        logger.warning("⚠️ Spread too high: %s pips", spread_pips)
+        logger.warning("Spread too high: %s pips", spread_pips)
         return {"status": "rejected", "reason": "high_spread", "spread_pips": spread_pips}
 
     # get account info
@@ -86,6 +92,8 @@ async def execute_trade(symbol: str, side: str, confidence: int, stop_distance: 
 
     # compute absolute SL/TP prices
     tick = mt5c.mt5.symbol_info_tick(symbol)
+    if tick is None:
+        raise RuntimeError("Tick data unavailable for symbol")
     if side == "buy":
         price = tick.ask
         sl = price - (stop_distance or 0) if stop_distance else None
@@ -95,21 +103,39 @@ async def execute_trade(symbol: str, side: str, confidence: int, stop_distance: 
         sl = price + (stop_distance or 0) if stop_distance else None
         tp = price - (take_distance or 0) if take_distance else None
 
-    logger.info(f"🚀 Placing {side.upper()} {lots:.2f}L {symbol} @ {price:.5f} | SL: {sl:.5f} | TP: {tp:.5f} | Conf: {confidence}%")
+    # Safe formatting for logging values that may be None
+    price_str = f"{price:.5f}" if price is not None else "N/A"
+    sl_str = f"{sl:.5f}" if sl is not None else "N/A"
+    tp_str = f"{tp:.5f}" if tp is not None else "N/A"
+
+    logger.info("Placing %s %.2fL %s @ %s | SL: %s | TP: %s | Conf: %s%%",
+                side.upper(), lots, symbol, price_str, sl_str, tp_str, confidence)
 
     # send order (blocking call) via executor
     result = await asyncio.to_thread(mt5c.send_order, symbol, side, lots, price, sl, tp)
-    logger.info("✅ Order result: %s", result)
+
+    # Log MT5 retcode and result dict
+    try:
+        retcode = result.get('retcode') if isinstance(result, dict) else None
+    except Exception:
+        retcode = None
+    logger.info("Order result retcode=%s result=%s", retcode, result)
     
     # FEATURE 3: Draw arrow on chart
-    mt5c.place_arrow_on_chart(symbol, datetime.now(), side, price, confidence)
+    try:
+        mt5c.place_arrow_on_chart(symbol, datetime.now(), side, price if price is not None else 0.0, confidence)
+    except Exception:
+        logger.exception("Failed to place arrow on chart")
     
     # Track this trade
     global trades_today
     trades_today.append(datetime.now())
     
     # Update dashboard
-    mt5c.set_dashboard_state(side, confidence)
+    try:
+        mt5c.set_dashboard_state(side, confidence)
+    except Exception:
+        logger.exception("Failed to update dashboard state")
     
     return result
 
