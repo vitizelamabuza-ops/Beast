@@ -56,7 +56,7 @@ async def execute_trade(symbol: str, side: str, confidence: int, stop_distance: 
     
     # Check daily trade limit
     if has_hit_trade_limit():
-        logger.warning(f"⚠️ Daily trade limit reached ({cfg.MAX_TRADES_PER_DAY} trades). Skipping.")
+        logger.warning(f"Daily trade limit reached ({cfg.MAX_TRADES_PER_DAY} trades). Skipping.")
         return {"status": "rejected", "reason": "daily_limit_reached"}
     
     # Use MIN_CONFIDENCE_TO_TRADE for testing, CONFIDENCE_THRESHOLD for live
@@ -74,7 +74,7 @@ async def execute_trade(symbol: str, side: str, confidence: int, stop_distance: 
     # convert to pips approx
     spread_pips = spread / info.get("point", 1)
     if spread_pips > cfg.MAX_SPREAD_PIPS:
-        logger.warning("⚠️ Spread too high: %s pips", spread_pips)
+        logger.warning("Spread too high: %s pips", spread_pips)
         return {"status": "rejected", "reason": "high_spread", "spread_pips": spread_pips}
 
     # get account info
@@ -95,13 +95,13 @@ async def execute_trade(symbol: str, side: str, confidence: int, stop_distance: 
         sl = price + (stop_distance or 0) if stop_distance else None
         tp = price - (take_distance or 0) if take_distance else None
 
-    logger.info(f"🚀 Placing {side.upper()} {lots:.2f}L {symbol} @ {price:.5f} | SL: {sl:.5f} | TP: {tp:.5f} | Conf: {confidence}%")
+    logger.info(f"Placing {side.upper()} {lots:.2f}L {symbol} @ {price:.5f} | SL: {sl:.5f} | TP: {tp:.5f} | Conf: {confidence}%")
 
     # send order (blocking call) via executor
     result = await asyncio.to_thread(mt5c.send_order, symbol, side, lots, price, sl, tp)
-    logger.info("✅ Order result: %s", result)
+    logger.info("Order result: %s", result)
     
-    # FEATURE 3: Draw arrow on chart
+    # Draw arrow on chart
     mt5c.place_arrow_on_chart(symbol, datetime.now(), side, price, confidence)
     
     # Track this trade
