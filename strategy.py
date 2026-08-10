@@ -20,7 +20,7 @@ def score_signal(row: pd.Series, force_buy: bool = False) -> Dict[str, Any]:
     """
     # FEATURE 2: FORCE TEST BUTTON
     if force_buy and cfg.ENABLE_FORCE_TEST:
-        logger.info("🔴 FORCE TEST ENABLED: Returning 99% confidence BUY signal")
+        logger.info("FORCE TEST ENABLED: Returning 99% confidence BUY signal")
         return {
             "signal": "buy",
             "confidence": 99,
@@ -97,7 +97,7 @@ def score_signal(row: pd.Series, force_buy: bool = False) -> Dict[str, Any]:
     # FEATURE 1: DEBUG MODE - Log all indicator values
     if cfg.DEBUG_MODE:
         logger.info(
-            f"📊 DEBUG: RSI={row['rsi14']:.2f} | EMA50={row['ema50']:.5f} | "
+            f"DEBUG: RSI={row['rsi14']:.2f} | EMA50={row['ema50']:.5f} | "
             f"EMA200={row['ema200']:.5f} | Price={row['close']:.5f} | "
             f"Confidence={final_conf}% | Signal={signal.upper()} | "
             f"MACD={row['macd_hist']:.6f} | ADX={row['adx14']:.2f}"
