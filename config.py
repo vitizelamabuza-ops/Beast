@@ -9,10 +9,11 @@ load_dotenv()
 
 @dataclass
 class Config:
+    MT5_TERMINAL_PATH: str | None = None  # preferred full path to terminal64.exe
     MT5_LOGIN: int | None = None
     MT5_PASSWORD: str | None = None
     MT5_SERVER: str | None = None
-    MT5_PATH: str | None = None  # optional path to terminal64.exe
+    MT5_PATH: str | None = None  # legacy optional path to terminal64.exe
     SYMBOL: str = "EURUSD"
     TIMEFRAME: str = "H1"  # e.g., M1, M5, H1, D1
     LOT_SIZE: float = 0.01
@@ -47,6 +48,7 @@ def _get_bool(key: str, default: bool) -> bool:
 
 
 cfg = Config(
+    MT5_TERMINAL_PATH=os.getenv("MT5_TERMINAL_PATH"),
     MT5_LOGIN=_get_int("MT5_LOGIN"),
     MT5_PASSWORD=os.getenv("MT5_PASSWORD"),
     MT5_SERVER=os.getenv("MT5_SERVER"),
